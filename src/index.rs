@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use rayon::prelude::*;
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -17,25 +18,25 @@ const INDEX_FILE: &str = "bm25_index.json";
 #[derive(Serialize, Deserialize, Clone)]
 pub struct BM25Index {
     /// Term frequencies per document: path -> (term -> count)
-    pub documents: HashMap<PathBuf, HashMap<String, u32>>,
+    pub documents: FxHashMap<PathBuf, FxHashMap<String, u32>>,
     /// Inverse document frequencies: term -> IDF score
-    pub idf: HashMap<String, f64>,
+    pub idf: FxHashMap<String, f64>,
     /// Average document length
     pub avg_doc_len: f64,
     /// Total number of documents
     pub total_docs: usize,
     /// File modification times for change detection
-    pub file_mtimes: HashMap<PathBuf, u64>,
+    pub file_mtimes: FxHashMap<PathBuf, u64>,
 }
 
 impl BM25Index {
     pub fn new() -> Self {
         Self {
-            documents: HashMap::new(),
-            idf: HashMap::new(),
+            documents: FxHashMap::default(),
+            idf: FxHashMap::default(),
             avg_doc_len: 0.0,
             total_docs: 0,
-            file_mtimes: HashMap::new(),
+            file_mtimes: FxHashMap::default(),
         }
     }
 }
@@ -100,7 +101,7 @@ pub fn init_index(args: InitArgs) -> Result<()> {
     }
 
     // Index files in parallel
-    let new_docs: Vec<(PathBuf, HashMap<String, u32>, u64)> = files_to_index
+    let new_docs: Vec<(PathBuf, FxHashMap<String, u32>, u64)> = files_to_index
         .par_iter()
         .filter_map(|path| {
             match index_file(path) {
@@ -153,7 +154,7 @@ fn get_mtime(path: &Path) -> Result<u64> {
     Ok(mtime)
 }
 
-fn index_file(path: &Path) -> Result<(HashMap<String, u32>, u64)> {
+fn index_file(path: &Path) -> Result<(FxHashMap<String, u32>, u64)> {
     let mtime = get_mtime(path)?;
     
     let mut file = File::open(path)?;
@@ -161,7 +162,7 @@ fn index_file(path: &Path) -> Result<(HashMap<String, u32>, u64)> {
     file.read_to_string(&mut content)?;
 
     let tokens = tokenize(&content, true);
-    let mut term_freq: HashMap<String, u32> = HashMap::new();
+    let mut term_freq: FxHashMap<String, u32> = FxHashMap::default();
 
     for token in tokens {
         *term_freq.entry(token).or_insert(0) += 1;
@@ -172,7 +173,7 @@ fn index_file(path: &Path) -> Result<(HashMap<String, u32>, u64)> {
 
 fn recalculate_idf(index: &mut BM25Index) {
     // Calculate document frequencies
-    let mut df: HashMap<String, usize> = HashMap::new();
+    let mut df: FxHashMap<String, usize> = FxHashMap::default();
     let mut total_len: usize = 0;
 
     for doc in index.documents.values() {

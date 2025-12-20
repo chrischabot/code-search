@@ -9,6 +9,8 @@ license = "MIT"
 # CLI parsing
 clap = { version = "4.4", features = ["derive"] }
 
+# Memory allocator  
+
 # File traversal (respects gitignore)
 ignore = "0.4"
 
@@ -24,6 +26,9 @@ memchr = "2.6"
 # JSON serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+
+# Faster HashMap
+rustc-hash = "2.0"
 
 # Colored terminal output
 termcolor = "1.4"

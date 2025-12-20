@@ -1,5 +1,6 @@
 use anyhow::Result;
 use rayon::prelude::*;
+use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -109,40 +110,51 @@ impl SemanticSearcher {
         let reader = BufReader::new(file);
         let lines: Vec<String> = reader.lines().filter_map(|l| l.ok()).collect();
 
-        // Score each line
+        let query_set: std::collections::HashSet<&str> = 
+            self.query_tokens.iter().map(|s| s.as_str()).collect();
+
         let mut line_scores: Vec<(usize, f64)> = lines
             .iter()
             .enumerate()
-            .map(|(idx, line)| {
+            .filter_map(|(idx, line)| {
                 let line_tokens = tokenize(line, self.ignore_case);
                 let mut score = 0.0;
-                for qt in &self.query_tokens {
-                    if line_tokens.contains(qt) {
+                for token in &line_tokens {
+                    if query_set.contains(token.as_str()) {
                         score += 1.0;
                     }
                 }
-                (idx, score)
+                if score > 0.0 {
+                    Some((idx, score))
+                } else {
+                    None
+                }
             })
-            .filter(|(_, score)| *score > 0.0)
             .collect();
 
-        line_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        line_scores.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Take top matching lines
         let top_lines: Vec<(usize, f64)> = line_scores.into_iter().take(5).collect();
 
-        let mut results = Vec::new();
+        let mut results = Vec::with_capacity(top_lines.len());
         for (line_idx, line_score) in top_lines {
             let line_content = lines[line_idx].clone();
             
-            // Get context
-            let context_before: Vec<String> = (line_idx.saturating_sub(self.before_context)..line_idx)
-                .filter_map(|i| lines.get(i).cloned())
-                .collect();
+            let context_before = if self.before_context > 0 {
+                (line_idx.saturating_sub(self.before_context)..line_idx)
+                    .filter_map(|i| lines.get(i).cloned())
+                    .collect()
+            } else {
+                Vec::new()
+            };
 
-            let context_after: Vec<String> = (line_idx + 1..=(line_idx + self.after_context).min(lines.len().saturating_sub(1)))
-                .filter_map(|i| lines.get(i).cloned())
-                .collect();
+            let context_after = if self.after_context > 0 {
+                (line_idx + 1..=(line_idx + self.after_context).min(lines.len().saturating_sub(1)))
+                    .filter_map(|i| lines.get(i).cloned())
+                    .collect()
+            } else {
+                Vec::new()
+            };
 
             results.push(SearchResult {
                 path: path.to_path_buf(),
@@ -159,19 +171,25 @@ impl SemanticSearcher {
     }
 }
 
-/// Tokenize text for BM25
+/// Tokenize text for BM25 - optimized version
 pub fn tokenize(text: &str, lowercase: bool) -> Vec<String> {
-    let text = if lowercase {
-        text.to_lowercase()
+    // Pre-allocate with reasonable capacity
+    let mut tokens = Vec::with_capacity(text.len() / 10);
+    
+    let text_cow = if lowercase {
+        std::borrow::Cow::Owned(text.to_lowercase())
     } else {
-        text.to_string()
+        std::borrow::Cow::Borrowed(text)
     };
-
-    // Split on non-alphanumeric characters, filter short tokens
-    text.split(|c: char| !c.is_alphanumeric() && c != '_')
-        .filter(|s| s.len() >= 2)
-        .map(|s| s.to_string())
-        .collect()
+    
+    // Split and filter in one pass
+    for token in text_cow.split(|c: char| !c.is_alphanumeric() && c != '_') {
+        if token.len() >= 2 {
+            tokens.push(token.to_string());
+        }
+    }
+    
+    tokens
 }
 
 /// BM25 parameters
@@ -181,8 +199,8 @@ const B: f64 = 0.75;
 /// Calculate BM25 score
 fn calculate_bm25(
     query_tokens: &[String],
-    doc_stats: &HashMap<String, u32>,
-    idf: &HashMap<String, f64>,
+    doc_stats: &FxHashMap<String, u32>,
+    idf: &FxHashMap<String, f64>,
     avg_doc_len: f64,
     _total_docs: usize,
 ) -> f64 {
@@ -208,8 +226,8 @@ fn build_index_on_the_fly(path: &Path, config: &WalkerConfig) -> Result<BM25Inde
     
     let files = walk_files(path, config)?;
     
-    let mut documents: HashMap<PathBuf, HashMap<String, u32>> = HashMap::new();
-    let mut df: HashMap<String, usize> = HashMap::new();
+    let mut documents: FxHashMap<PathBuf, FxHashMap<String, u32>> = FxHashMap::default();
+    let mut df: FxHashMap<String, usize> = FxHashMap::default();
     let mut total_len: usize = 0;
 
     for file_path in &files {
@@ -217,7 +235,7 @@ fn build_index_on_the_fly(path: &Path, config: &WalkerConfig) -> Result<BM25Inde
             let mut content = String::new();
             if file.read_to_string(&mut content).is_ok() {
                 let tokens = tokenize(&content, true);
-                let mut term_freq: HashMap<String, u32> = HashMap::new();
+                let mut term_freq: FxHashMap<String, u32> = FxHashMap::default();
                 
                 for token in &tokens {
                     *term_freq.entry(token.clone()).or_insert(0) += 1;
@@ -242,7 +260,7 @@ fn build_index_on_the_fly(path: &Path, config: &WalkerConfig) -> Result<BM25Inde
     };
 
     // Calculate IDF
-    let mut idf: HashMap<String, f64> = HashMap::new();
+    let mut idf: FxHashMap<String, f64> = FxHashMap::default();
     for (term, doc_count) in &df {
         let idf_value = ((total_docs as f64 - *doc_count as f64 + 0.5) / (*doc_count as f64 + 0.5) + 1.0).ln();
         idf.insert(term.clone(), idf_value);
@@ -253,6 +271,6 @@ fn build_index_on_the_fly(path: &Path, config: &WalkerConfig) -> Result<BM25Inde
         idf,
         avg_doc_len,
         total_docs,
-        file_mtimes: HashMap::new(),
+        file_mtimes: FxHashMap::default(),
     })
 }
