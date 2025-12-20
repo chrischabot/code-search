@@ -54,122 +54,124 @@ impl PlainSearcher {
         })
     }
 
+    #[inline]
     fn search_file(&self, path: &Path, found_count: &AtomicUsize) -> Result<Vec<SearchResult>> {
-        // Check if we've already found enough results
+        // Early exit
         if let Some(max) = self.max_results {
             if found_count.load(Ordering::Relaxed) >= max {
-                return Ok(vec![]);
+                return Ok(Vec::new());
             }
         }
 
         let file = match File::open(path) {
             Ok(f) => f,
-            Err(_) => return Ok(vec![]),
+            Err(_) => return Ok(Vec::new()),
         };
 
-        // Check file size - skip very large files for performance
         let metadata = file.metadata()?;
         if metadata.len() > 100_000_000 {
-            // Skip files > 100MB
-            return Ok(vec![]);
+            return Ok(Vec::new());
         }
 
         let mmap = match unsafe { Mmap::map(&file) } {
             Ok(m) => m,
-            Err(_) => return Ok(vec![]),
+            Err(_) => return Ok(Vec::new()),
         };
 
-        // Skip binary files (check for null bytes in first 8KB)
-        let check_len = std::cmp::min(8192, mmap.len());
-        if mmap[..check_len].contains(&0) {
-            return Ok(vec![]);
-        }
-
         let content = &mmap[..];
-        let mut results = Vec::new();
-
-        // Build the searcher
+        
+        // Build finder
         let finder = if self.ignore_case {
             memmem::Finder::new(&self.pattern_lower)
         } else {
             memmem::Finder::new(&self.pattern)
         };
 
-        // For case-insensitive, we need to lowercase the content
+        // Optimized path for files_only and count_only - skip binary check
+        if self.files_only || self.count_only {
+            let search_content: std::borrow::Cow<[u8]> = if self.ignore_case {
+                std::borrow::Cow::Owned(content.to_ascii_lowercase())
+            } else {
+                std::borrow::Cow::Borrowed(content)
+            };
+
+            if self.files_only {
+                if finder.find(&search_content).is_some() {
+                    found_count.fetch_add(1, Ordering::Relaxed);
+                    return Ok(vec![SearchResult {
+                        path: path.to_path_buf(),
+                        line_number: 0,
+                        column: 0,
+                        line_content: String::new(),
+                        context_before: Vec::new(),
+                        context_after: Vec::new(),
+                        score: None,
+                    }]);
+                }
+                return Ok(Vec::new());
+            }
+
+            // Count mode
+            let count = finder.find_iter(&search_content).count();
+            if count > 0 {
+                found_count.fetch_add(1, Ordering::Relaxed);
+                return Ok(vec![SearchResult {
+                    path: path.to_path_buf(),
+                    line_number: count,
+                    column: 0,
+                    line_content: String::new(),
+                    context_before: Vec::new(),
+                    context_after: Vec::new(),
+                    score: None,
+                }]);
+            }
+            return Ok(Vec::new());
+        }
+
+        // Full search mode - need binary check
+        let check_len = std::cmp::min(4096, mmap.len());
+        if mmap[..check_len].contains(&0) {
+            return Ok(Vec::new());
+        }
+
         let search_content: std::borrow::Cow<[u8]> = if self.ignore_case {
             std::borrow::Cow::Owned(content.to_ascii_lowercase())
         } else {
             std::borrow::Cow::Borrowed(content)
         };
 
-        // Quick early exit if pattern not found at all
+        // Quick early exit if no matches
         if finder.find(&search_content).is_none() {
-            return Ok(vec![]);
+            return Ok(Vec::new());
         }
 
-        // Find all line starts for context
+        // Lazy line_starts - only build when we have matches
         let line_starts: Vec<usize> = std::iter::once(0)
-            .chain(
-                memchr::memchr_iter(b'\n', content)
-                    .map(|i| i + 1)
-            )
+            .chain(memchr::memchr_iter(b'\n', content).map(|i| i + 1))
             .collect();
 
-        let get_line_num = |byte_offset: usize| -> usize {
-            match line_starts.binary_search(&byte_offset) {
-                Ok(n) => n,
-                Err(n) => n.saturating_sub(1),
-            }
-        };
-
-        // Files only mode
-        if self.files_only {
-            found_count.fetch_add(1, Ordering::Relaxed);
-            results.push(SearchResult {
-                path: path.to_path_buf(),
-                line_number: 0,
-                column: 0,
-                line_content: String::new(),
-                context_before: vec![],
-                context_after: vec![],
-                score: None,
-            });
-            return Ok(results);
-        }
-
-        // Count only mode
-        if self.count_only {
-            let count = finder.find_iter(&search_content).count();
-            if count > 0 {
-                found_count.fetch_add(1, Ordering::Relaxed);
-                results.push(SearchResult {
-                    path: path.to_path_buf(),
-                    line_number: count,
-                    column: 0,
-                    line_content: String::new(),
-                    context_before: vec![],
-                    context_after: vec![],
-                    score: None,
-                });
-            }
-            return Ok(results);
-        }
-
-        // Track which lines we've already added (to avoid duplicates for multiple matches on same line)
+        // Pre-allocate results with reasonable capacity
+        let estimated_matches = std::cmp::min(
+            self.max_results.unwrap_or(100),
+            100
+        );
+        let mut results = Vec::with_capacity(estimated_matches);
         let mut seen_lines = std::collections::HashSet::new();
 
-        // Find all matches with context
+        // Process all matches
         for match_start in finder.find_iter(&search_content) {
-            // Check if we've found enough
             if let Some(max) = self.max_results {
                 if found_count.load(Ordering::Relaxed) >= max {
                     break;
                 }
             }
 
-            let line_num = get_line_num(match_start);
+            // Inline line number calculation
+            let line_num = match line_starts.binary_search(&match_start) {
+                Ok(n) => n,
+                Err(n) => n.saturating_sub(1),
+            };
             
-            // Skip if we've already processed this line
             if !seen_lines.insert(line_num) {
                 continue;
             }
@@ -179,39 +181,46 @@ impl PlainSearcher {
                 .map(|&s| s.saturating_sub(1))
                 .unwrap_or(content.len());
 
-            let line_content = String::from_utf8_lossy(&content[line_start..line_end]).to_string();
+            let line_content = String::from_utf8_lossy(&content[line_start..line_end]).into_owned();
             let column = match_start - line_start;
 
-            // Get context before
-            let context_before: Vec<String> = (line_num.saturating_sub(self.before_context)..line_num)
-                .filter_map(|ln| {
-                    let start = line_starts[ln];
-                    let end = line_starts.get(ln + 1)
-                        .map(|&s| s.saturating_sub(1))
-                        .unwrap_or(content.len());
-                    Some(String::from_utf8_lossy(&content[start..end]).to_string())
-                })
-                .collect();
+            // Only build context if needed
+            let context_before = if self.before_context > 0 {
+                (line_num.saturating_sub(self.before_context)..line_num)
+                    .map(|ln| {
+                        let start = line_starts[ln];
+                        let end = line_starts.get(ln + 1)
+                            .map(|&s| s.saturating_sub(1))
+                            .unwrap_or(content.len());
+                        String::from_utf8_lossy(&content[start..end]).into_owned()
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
 
-            // Get context after
-            let context_after: Vec<String> = (line_num + 1..=(line_num + self.after_context).min(line_starts.len().saturating_sub(1)))
-                .filter_map(|ln| {
-                    if ln >= line_starts.len() {
-                        return None;
-                    }
-                    let start = line_starts[ln];
-                    let end = line_starts.get(ln + 1)
-                        .map(|&s| s.saturating_sub(1))
-                        .unwrap_or(content.len());
-                    Some(String::from_utf8_lossy(&content[start..end]).to_string())
-                })
-                .collect();
+            let context_after = if self.after_context > 0 {
+                (line_num + 1..=(line_num + self.after_context).min(line_starts.len().saturating_sub(1)))
+                    .filter_map(|ln| {
+                        if ln >= line_starts.len() {
+                            return None;
+                        }
+                        let start = line_starts[ln];
+                        let end = line_starts.get(ln + 1)
+                            .map(|&s| s.saturating_sub(1))
+                            .unwrap_or(content.len());
+                        Some(String::from_utf8_lossy(&content[start..end]).into_owned())
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
 
             found_count.fetch_add(1, Ordering::Relaxed);
             results.push(SearchResult {
                 path: path.to_path_buf(),
-                line_number: line_num + 1, // 1-indexed
-                column: column + 1, // 1-indexed
+                line_number: line_num + 1,
+                column: column + 1,
                 line_content,
                 context_before,
                 context_after,

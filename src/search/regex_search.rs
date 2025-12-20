@@ -53,7 +53,7 @@ impl RegexSearcher {
     }
 
     fn search_file(&self, path: &Path, found_count: &AtomicUsize) -> Result<Vec<SearchResult>> {
-        // Check if we've already found enough results
+        // Early exit check
         if let Some(max) = self.max_results {
             if found_count.load(Ordering::Relaxed) >= max {
                 return Ok(vec![]);
@@ -65,7 +65,6 @@ impl RegexSearcher {
             Err(_) => return Ok(vec![]),
         };
 
-        // Check file size - skip very large files for performance
         let metadata = file.metadata()?;
         if metadata.len() > 100_000_000 {
             return Ok(vec![]);
@@ -76,21 +75,54 @@ impl RegexSearcher {
             Err(_) => return Ok(vec![]),
         };
 
-        // Skip binary files
+        let content = &mmap[..];
+
+        // For files_only and count_only, skip binary check
+        if self.files_only {
+            if self.pattern.is_match(content) {
+                found_count.fetch_add(1, Ordering::Relaxed);
+                return Ok(vec![SearchResult {
+                    path: path.to_path_buf(),
+                    line_number: 0,
+                    column: 0,
+                    line_content: String::new(),
+                    context_before: vec![],
+                    context_after: vec![],
+                    score: None,
+                }]);
+            }
+            return Ok(vec![]);
+        }
+
+        if self.count_only {
+            let count = self.pattern.find_iter(content).count();
+            if count > 0 {
+                found_count.fetch_add(1, Ordering::Relaxed);
+                return Ok(vec![SearchResult {
+                    path: path.to_path_buf(),
+                    line_number: count,
+                    column: 0,
+                    line_content: String::new(),
+                    context_before: vec![],
+                    context_after: vec![],
+                    score: None,
+                }]);
+            }
+            return Ok(vec![]);
+        }
+
+        // Full mode - need binary check
         let check_len = std::cmp::min(8192, mmap.len());
         if mmap[..check_len].contains(&0) {
             return Ok(vec![]);
         }
 
-        let content = &mmap[..];
-        let mut results = Vec::new();
-
-        // Quick check if pattern matches at all
+        // Quick check for any matches
         if !self.pattern.is_match(content) {
             return Ok(vec![]);
         }
 
-        // Find all line starts
+        // Only calculate line_starts when we have matches
         let line_starts: Vec<usize> = std::iter::once(0)
             .chain(memchr::memchr_iter(b'\n', content).map(|i| i + 1))
             .collect();
@@ -102,45 +134,10 @@ impl RegexSearcher {
             }
         };
 
-        // Files only mode
-        if self.files_only {
-            found_count.fetch_add(1, Ordering::Relaxed);
-            results.push(SearchResult {
-                path: path.to_path_buf(),
-                line_number: 0,
-                column: 0,
-                line_content: String::new(),
-                context_before: vec![],
-                context_after: vec![],
-                score: None,
-            });
-            return Ok(results);
-        }
-
-        // Count only mode
-        if self.count_only {
-            let count = self.pattern.find_iter(content).count();
-            if count > 0 {
-                found_count.fetch_add(1, Ordering::Relaxed);
-                results.push(SearchResult {
-                    path: path.to_path_buf(),
-                    line_number: count,
-                    column: 0,
-                    line_content: String::new(),
-                    context_before: vec![],
-                    context_after: vec![],
-                    score: None,
-                });
-            }
-            return Ok(results);
-        }
-
-        // Track which lines we've already added
         let mut seen_lines = std::collections::HashSet::new();
+        let mut results = Vec::new();
 
-        // Find all matches with context
         for mat in self.pattern.find_iter(content) {
-            // Check if we've found enough
             if let Some(max) = self.max_results {
                 if found_count.load(Ordering::Relaxed) >= max {
                     break;
@@ -150,7 +147,6 @@ impl RegexSearcher {
             let match_start = mat.start();
             let line_num = get_line_num(match_start);
             
-            // Skip if we've already processed this line
             if !seen_lines.insert(line_num) {
                 continue;
             }
@@ -161,36 +157,42 @@ impl RegexSearcher {
                 .map(|&s| s.saturating_sub(1))
                 .unwrap_or(content.len());
 
-            let line_content = String::from_utf8_lossy(&content[line_start..line_end]).to_string();
+            let line_content = String::from_utf8_lossy(&content[line_start..line_end]).into_owned();
             let column = match_start - line_start;
 
-            // Get context before
-            let context_before: Vec<String> = (line_num.saturating_sub(self.before_context)..line_num)
-                .filter_map(|ln| {
-                    let start = line_starts[ln];
-                    let end = line_starts
-                        .get(ln + 1)
-                        .map(|&s| s.saturating_sub(1))
-                        .unwrap_or(content.len());
-                    Some(String::from_utf8_lossy(&content[start..end]).to_string())
-                })
-                .collect();
+            // Optimize context extraction
+            let context_before = if self.before_context > 0 {
+                (line_num.saturating_sub(self.before_context)..line_num)
+                    .map(|ln| {
+                        let start = line_starts[ln];
+                        let end = line_starts
+                            .get(ln + 1)
+                            .map(|&s| s.saturating_sub(1))
+                            .unwrap_or(content.len());
+                        String::from_utf8_lossy(&content[start..end]).into_owned()
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
 
-            // Get context after
-            let context_after: Vec<String> = (line_num + 1
-                ..=(line_num + self.after_context).min(line_starts.len().saturating_sub(1)))
-                .filter_map(|ln| {
-                    if ln >= line_starts.len() {
-                        return None;
-                    }
-                    let start = line_starts[ln];
-                    let end = line_starts
-                        .get(ln + 1)
-                        .map(|&s| s.saturating_sub(1))
-                        .unwrap_or(content.len());
-                    Some(String::from_utf8_lossy(&content[start..end]).to_string())
-                })
-                .collect();
+            let context_after = if self.after_context > 0 {
+                (line_num + 1..=(line_num + self.after_context).min(line_starts.len().saturating_sub(1)))
+                    .filter_map(|ln| {
+                        if ln >= line_starts.len() {
+                            return None;
+                        }
+                        let start = line_starts[ln];
+                        let end = line_starts
+                            .get(ln + 1)
+                            .map(|&s| s.saturating_sub(1))
+                            .unwrap_or(content.len());
+                        Some(String::from_utf8_lossy(&content[start..end]).into_owned())
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
 
             found_count.fetch_add(1, Ordering::Relaxed);
             results.push(SearchResult {
