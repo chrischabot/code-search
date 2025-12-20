@@ -1,0 +1,51 @@
+[package]
+name = "code-search"
+version = "0.1.0"
+edition = "2021"
+description = "An extremely fast code search tool with plain, regex, and semantic (BM25) search"
+license = "MIT"
+
+[dependencies]
+# CLI parsing
+clap = { version = "4.4", features = ["derive"] }
+
+# File traversal (respects gitignore)
+ignore = "0.4"
+
+# Regex support
+regex = "1.10"
+
+# Parallel processing
+rayon = "1.8"
+
+# Fast byte-level searching
+memchr = "2.6"
+
+# JSON serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Colored terminal output
+termcolor = "1.4"
+
+# Memory-mapped files for performance
+memmap2 = "0.9"
+
+# BM25 tokenization
+unicode-segmentation = "1.10"
+
+# File metadata and time
+filetime = "0.2"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Hash for change detection
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
