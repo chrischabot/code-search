@@ -107,6 +107,13 @@ impl Searcher for SemanticSearcher {
 impl SemanticSearcher {
     fn find_best_lines(&self, path: &Path, doc_score: f64) -> Result<Vec<SearchResult>> {
         let file = File::open(path)?;
+        
+        // Prevent loading huge files into memory
+        let metadata = file.metadata()?;
+        if metadata.len() > 100_000_000 {
+            return Ok(Vec::new());
+        }
+        
         let reader = BufReader::new(file);
         let lines: Vec<String> = reader.lines().filter_map(|l| l.ok()).collect();
 

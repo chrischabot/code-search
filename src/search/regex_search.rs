@@ -27,6 +27,8 @@ impl RegexSearcher {
         let pattern = regex::bytes::RegexBuilder::new(&args.pattern)
             .case_insensitive(args.ignore_case)
             .multi_line(true)
+            .size_limit(10_000_000)
+            .dfa_size_limit(10_000_000)
             .build()?;
 
         let (before, after) = if let Some(ctx) = args.context {
@@ -158,7 +160,13 @@ impl RegexSearcher {
                 .unwrap_or(content.len());
 
             let line_content = String::from_utf8_lossy(&content[line_start..line_end]).into_owned();
-            let column = match_start - line_start;
+            
+            let column = if match_start >= line_start {
+                match_start - line_start
+            } else {
+                eprintln!("Warning: match_start < line_start in {:?}", path);
+                0
+            };
 
             // Optimize context extraction
             let context_before = if self.before_context > 0 {
