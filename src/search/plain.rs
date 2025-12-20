@@ -182,7 +182,14 @@ impl PlainSearcher {
                 .unwrap_or(content.len());
 
             let line_content = String::from_utf8_lossy(&content[line_start..line_end]).into_owned();
-            let column = match_start - line_start;
+            
+            // Bounds check to prevent underflow
+            let column = if match_start >= line_start {
+                match_start - line_start
+            } else {
+                eprintln!("Warning: match_start < line_start in {:?}", path);
+                0
+            };
 
             // Only build context if needed
             let context_before = if self.before_context > 0 {

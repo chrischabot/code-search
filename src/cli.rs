@@ -39,15 +39,15 @@ pub struct SearchArgs {
     pub ignore_case: bool,
 
     /// Show N lines of context before matches
-    #[arg(short = 'B', long, default_value = "0")]
+    #[arg(short = 'B', long, default_value = "0", value_parser = validate_context_size)]
     pub before_context: usize,
 
     /// Show N lines of context after matches
-    #[arg(short = 'A', long, default_value = "0")]
+    #[arg(short = 'A', long, default_value = "0", value_parser = validate_context_size)]
     pub after_context: usize,
 
     /// Show N lines of context around matches
-    #[arg(short = 'C', long)]
+    #[arg(short = 'C', long, value_parser = validate_context_size)]
     pub context: Option<usize>,
 
     /// Filter by file extensions (e.g., py,js,rs)
@@ -163,5 +163,14 @@ impl Language {
             exts.extend(lang.extensions());
         }
         exts
+    }
+}
+
+fn validate_context_size(s: &str) -> Result<usize, String> {
+    let value: usize = s.parse().map_err(|_| format!("'{}' is not a valid number", s))?;
+    if value > 100 {
+        Err(format!("Context size {} exceeds maximum of 100", value))
+    } else {
+        Ok(value)
     }
 }

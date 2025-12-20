@@ -203,6 +203,13 @@ fn recalculate_idf(index: &mut BM25Index) {
 
 pub fn load_index(index_dir: &Path) -> Result<BM25Index> {
     let index_path = index_dir.join(INDEX_FILE);
+    
+    // Validate index file size before loading to prevent DoS
+    let metadata = fs::metadata(&index_path).context("Failed to read index metadata")?;
+    if metadata.len() > 100_000_000 {
+        anyhow::bail!("Index file too large (>100MB), possible corruption or attack");
+    }
+    
     let file = File::open(&index_path).context("Failed to open index file")?;
     let reader = BufReader::new(file);
     let index: BM25Index = serde_json::from_reader(reader).context("Failed to parse index")?;
