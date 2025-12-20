@@ -4,6 +4,8 @@ mod output;
 mod search;
 mod walker;
 
+
+
 use anyhow::Result;
 use clap::Parser;
 use cli::{Cli, Commands};
