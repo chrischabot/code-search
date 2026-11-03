@@ -1,278 +1,116 @@
 # code-search
-Extremely fast code search tool with plain, regex, and semantic (BM25) search for AI agents and developers
 
-## Installation
+code-search is a command-line tool for searching source code, written in Rust for coding agents and the developers working alongside them. An agent dropped into an unfamiliar repository usually knows the idea it is looking for well before it knows the identifier, which is an awkward fit for `grep`-style tools: they return every line containing the text or pattern you asked for, in no order of relevance, and leave the reader to work out which files matter. code-search keeps exact and regex matching for when you do know the name, adds BM25 keyword ranking for when you only have a few likely words, and puts all three behind one command with one JSON output format.
 
-```bash
-# Build from source
-cargo build --release
+It runs as a single local binary with no model, server or network connection behind it, and that also bounds what the third mode can do: despite its name, `--mode semantic` involves no embeddings and ranks files only by the words they share with your query, so a file that never uses those words will not appear, however closely it relates to the idea.
 
-# The binary will be at target/release/code-search
-```
+## How it works
 
-### Pre-built Binaries
+code-search walks the tree with the `ignore` crate, which skips hidden files and anything excluded by `.gitignore`. Plain and regex search then scan the files in parallel with `rayon`, memory-mapping each one and searching its bytes with the SIMD-accelerated substring finder from `memchr` or with the `regex` crate, and they only work out line numbers and context for files that contain a match.
 
-Download pre-built binaries from the [Releases](https://github.com/chrischabot/code-search/releases) page.
+Semantic search uses [BM25](https://en.wikipedia.org/wiki/Okapi_BM25), the keyword-relevance formula behind many search engines, under which a file scores higher when it uses the rarer words of your query often for its length. Each file is split into lowercase tokens of letters, digits and underscores, and `code-search init` saves the per-file term counts to `.code-search/bm25_index.json` inside the directory you give it; without that index, the same counts are rebuilt in memory for every search. Once the files are ranked, code-search reads them again and reports up to five lines from each, preferring the lines with the most query terms, with a score that multiplies the file's BM25 score by the number of those terms on the line.
 
-Available platforms:
-- Linux x86_64
-- macOS x86_64 (Intel)
-- macOS ARM64 (Apple Silicon)
+Tokens are whole identifiers and nothing is stemmed, so `login` matches the word `login` but not `logins`, `userLogin` or `user_login`. Queries therefore work best as several words likely to appear verbatim in the code and its comments, and a known identifier is better served by plain or regex search.
 
-### Building from Source
+## Install
+
+You need a stable [Rust toolchain](https://rustup.rs). Building from source gets you the current code:
 
 ```bash
-# Clone the repository
 git clone https://github.com/chrischabot/code-search.git
 cd code-search
-
-# Build for your platform
-cargo build --release
-
-# The binary will be at target/release/code-search
-
-# Or use the build script for Linux
-bash build-release.sh
+cargo install --path .
 ```
 
-## Quick Start
+That puts `code-search` in Cargo's bin directory, usually `~/.cargo/bin`. To build without installing, run `cargo build --release` and use `target/release/code-search`.
 
-```bash
-# Plain text search - fastest, use when you know the exact string
-code-search search "useState" ./src
-
-# Regex search - use for patterns and structural matching
-code-search search --mode regex 'use[A-Z][a-z]+\(' ./src -l javascript,typescript
-
-# Semantic search - use for conceptual discovery
-code-search init ./src                    # Build index first (recommended)
-code-search search --mode semantic "authentication login user" ./src
-```
-
-## When to Use Each Search Mode
-
-### Plain Text Search (Default)
-**Best for:** Known identifiers, exact matches, maximum speed
-
-```bash
-# Find a specific function
-code-search search "calculate_total" ./src -l python
-
-# Case-insensitive search
-code-search search -i "TODO" ./src
-
-# Show context lines
-code-search search -C 3 "function_name" ./src
-```
-
-### Regex Search
-**Best for:** Structural patterns, variations, syntax-based discovery
-
-```bash
-# Find all React hooks (useXxx pattern)
-code-search search --mode regex 'use[A-Z][a-z]+\(' ./src
-
-# Find Python function definitions with parameters
-code-search search --mode regex 'def\s+\w+\s*\([^)]+\)\s*:' ./app -l python
-
-# Find class declarations
-code-search search --mode regex 'class\s+\w+' ./src
-```
-
-### Semantic Search (BM25)
-**Best for:** Conceptual discovery, feature exploration, unknown terminology
-
-```bash
-# Initialize index first for better performance
-code-search init ./src
-
-# Find authentication-related code
-code-search search --mode semantic "user authentication login session security" ./src
-
-# Find error handling patterns
-code-search search --mode semantic "exception handling error logging retry" ./app
-
-# Discover API integration code
-code-search search --mode semantic "http request api call external service" ./src
-```
-
-## Common Usage Patterns
-
-### Refactoring Workflow
-```bash
-# 1. Find all usages before changing
-code-search search "old_function_name" ./src -c
-
-# 2. Examine actual usage contexts
-code-search search "old_function_name" ./src -C 3
-
-# 3. Verify similar patterns
-code-search search --mode regex 'old_\w+_name' ./src
-```
-
-### Understanding New Codebase
-```bash
-# 1. Initialize semantic index
-code-search init ./repo -l python,javascript
-
-# 2. Find main entry points
-code-search search --mode semantic "main entry point initialization" ./repo -n 5
-
-# 3. Understand specific feature
-code-search search --mode semantic "authentication authorization" ./repo -n 10
-
-# 4. Find specific implementations
-code-search search --mode regex 'class\s+\w+Auth\w+' ./repo -l python
-```
-
-### Code Analysis for AI Agents
-```bash
-# Find all error handling (JSON output for parsing)
-code-search search --mode semantic "error exception handling logging" ./services -l python --output json
-
-# Find all public API functions
-code-search search --mode regex 'export\s+function\s+\w+' ./src -l typescript -C 2
-
-# Locate test coverage
-code-search search --files-only "test" ./tests -l python
-```
-
-## Features
-
-- **Plain Text Search**: Fast byte-level searching using SIMD-accelerated algorithms
-- **Regex Search**: Full regex support with case-insensitive and multi-line modes
-- **Semantic Search (BM25)**: Find conceptually relevant code using BM25 ranking
-- **Multiple Output Formats**: Human-readable (colored) and JSON for machine consumption
-- **Language Filtering**: Filter by 6 popular languages (Python, JavaScript, TypeScript, Java, Rust, Go)
-- **Context Lines**: Show lines before/after matches
-- **Parallel Processing**: Utilizes all available CPU cores
-- **Git-aware**: Respects `.gitignore` by default
-- **Incremental Indexing**: Only re-indexes changed files for semantic search
+The [v0.1.0 release](https://github.com/chrischabot/code-search/releases/tag/v0.1.0) has a prebuilt binary for Apple Silicon Macs only, built before the context and index size limits landed on `main`. [RELEASING.md](RELEASING.md) treats Linux x86_64 and both macOS architectures as the automated build targets, with Linux ARM64 and Windows as manual builds.
 
 ## Usage
 
-### Search Commands
-
 ```bash
-# Plain text search
-code-search search "pattern" /path/to/code
+# Exact text, when you know the identifier
+code-search search "calculate_total" ./src -l python
 
-# Regex search
-code-search search --mode regex "use[A-Z][a-z]+\(" /path/to/code
+# A regular expression, when you know the shape of the code
+code-search search --mode regex 'use[A-Z][a-z]+\(' ./src -l javascript,typescript -C 2
 
-# Semantic search (uses BM25 ranking)
-code-search search --mode semantic "authentication login user" /path/to/code
-
-# JSON output for machine consumption
-code-search search --output json "pattern" /path/to/code
-
-# Case-insensitive search
-code-search search -i "pattern" /path/to/code
-
-# Filter by language
-code-search search -l python,rust "def " /path/to/code
-
-# Show context lines
-code-search search -C 3 "pattern" /path/to/code  # 3 lines before and after
-
-# Count matches only
-code-search search -c "pattern" /path/to/code
-
-# Show only filenames with matches
-code-search search --files-only "pattern" /path/to/code
-
-# Limit results
-code-search search -n 10 "pattern" /path/to/code
-```
-
-### Index Commands
-
-```bash
-# Initialize BM25 index (speeds up semantic search)
-code-search init /path/to/code
-
-# Force rebuild of index
-code-search init --force /path/to/code
-
-# Index only specific languages
-code-search init -l python,javascript /path/to/code
-```
-
-## Options
-
-### Search Options
-
-| Option | Short | Description |
-|--------|-------|-------------|
-| `--mode` | `-m` | Search mode: `plain`, `regex`, or `semantic` |
-| `--output` | `-o` | Output format: `human` or `json` |
-| `--ignore-case` | `-i` | Case-insensitive search |
-| `--before-context` | `-B` | Lines of context before matches |
-| `--after-context` | `-A` | Lines of context after matches |
-| `--context` | `-C` | Lines of context around matches |
-| `--file-types` | `-t` | Filter by file extensions (comma-separated) |
-| `--languages` | `-l` | Filter by language (comma-separated) |
-| `--max-results` | `-n` | Maximum number of results |
-| `--files-only` | | Show only filenames with matches |
-| `--count` | `-c` | Count matches instead of showing them |
-| `--threads` | `-j` | Number of threads (0 = auto) |
-| `--hidden` | | Include hidden files |
-| `--no-ignore` | | Don't respect .gitignore |
-
-### Supported Languages
-
-- Python (`.py`, `.pyi`, `.pyw`)
-- JavaScript (`.js`, `.mjs`, `.cjs`, `.jsx`)
-- TypeScript (`.ts`, `.tsx`, `.mts`, `.cts`)
-- Java (`.java`)
-- Rust (`.rs`)
-- Go (`.go`)
-
-## Examples
-
-### Find all React hooks usage
-```bash
-code-search search --mode regex 'use[A-Z][a-z]+\(' ./src -l javascript,typescript
-```
-
-### Find authentication-related code semantically
-```bash
+# Ranked keywords, when you only have likely words
 code-search init ./src
-code-search search --mode semantic "user authentication login session" ./src
+code-search search --mode semantic -i "authentication login session" ./src -n 20
 ```
 
-### Get JSON output for CI integration
+The path defaults to the current directory, and `code-search search --help` lists every option. These are the ones you will use most:
+
+| Option | Effect |
+| --- | --- |
+| `-m`, `--mode` | `plain` (default), `regex` or `semantic` |
+| `-o`, `--output` | `human` (default) or `json` |
+| `-i`, `--ignore-case` | Case-insensitive matching |
+| `-A`, `-B`, `-C` | Lines of context after, before or around each match, up to 100 |
+| `-l`, `--languages` | Comma-separated: `python`, `javascript`, `typescript`, `java`, `rust`, `go` |
+| `-t`, `--file-types` | Comma-separated file extensions, used when `-l` is absent |
+| `-n`, `--max-results` | Maximum number of results |
+| `-c`, `--count` | Count occurrences per file (plain and regex) |
+| `--files-only` | List matching files (plain and regex) |
+| `-j`, `--threads` | Search threads; 0, the default, uses all available cores |
+| `--hidden` | Include hidden files |
+| `--no-ignore` | Also search files excluded by `.gitignore` and similar rules |
+
+Without `-l` or `-t`, every text file that isn't hidden or ignored is searched, so the six languages are shorthand for groups of extensions and not a limit on what code-search can read.
+
+### Working with the index
+
+Semantic search has a few rules that follow from how its index is built and stored:
+
+- Pass `-i`, as in the example above. The index is always lowercase, so without `-i` a capitalised query term matches nothing, and the step that picks lines only accepts the query's exact case, which can drop a file that ranked well.
+- Run `code-search init <path>` again after changing files, because search trusts the index as it stands. `init` re-reads files whose modification time changed, drops deleted ones and recalculates the term weights, while `--force` rebuilds from scratch.
+- Choose your filters when you run `init`, for example `code-search init ./repo -l python,javascript`. Once an index exists, semantic search scores everything in it, and `-l`, `-t`, `--hidden` and `--no-ignore` have no effect.
+- Search the same path from the same directory. The index is looked up under the search path and records file paths as they were walked, so after a relative `init`, a search from another directory finds files it cannot reopen and silently leaves them out. An absolute path avoids this.
+- Add `.code-search/` to your `.gitignore`.
+
+In this mode `-n` caps both the files considered and the lines printed, so `-n 5` can return five lines from a single file.
+
+### JSON output
+
+`--output json` prints a single document to stdout and keeps progress messages on stderr, so the output can be parsed directly:
+
+```json
+{
+  "total_matches": 1,
+  "results": [
+    {
+      "path": "./src/auth.py",
+      "line_number": 42,
+      "column": 1,
+      "line_content": "def authenticate(username, password):",
+      "score": 9.52
+    }
+  ]
+}
+```
+
+`score` appears only in semantic mode, and `context_before` and `context_after` only when there are context lines to show. `total_matches` counts the results in the document, after any `-n` limit. With `-c`, each result is a file with its count in `line_number`, and with `--files-only`, `line_number` is 0. The exit status is 0 whether or not anything matched, so check `total_matches` rather than the exit code. Human output does no terminal detection, so its colour codes can survive a pipe unless `NO_COLOR` is set, which is one more reason to parse JSON.
+
+### With an agent
+
+[SKILL.md](SKILL.md) is an agent skill covering when to use each mode, with worked examples. Once the binary is on your `PATH`, copy the file into your agent's skills directory; in Claude Code that means `~/.claude/skills/code-search/SKILL.md`.
+
+## Technical details
+
+Regex mode uses the syntax of the Rust `regex` crate, which has no look-around or backreferences. Symbolic links are not followed. Plain and regex search skip files over 100 MB and, unless you pass `-c` or `--files-only`, binary files, which they recognise by a NUL byte near the start of the file. Semantic search indexes only valid UTF-8.
+
+Rough timings recorded for 0.1.0 on four repositories of 800 to 9,400 files had ripgrep ahead every time, at 15 to 300 ms against 20 to 450 ms for code-search. If all you need is exact or regex text search, ripgrep is the better tool, and the reason to use code-search is having ranked search behind the same command and output format.
+
+## Development
+
 ```bash
-code-search search --output json "TODO" ./src
+cargo build --release
+cargo test --release
 ```
 
-### Search with context
-```bash
-code-search search -C 2 "def main" ./src -l python
-```
+The integration tests in `tests/integration_tests.rs` run the binary at `target/release/code-search`, so they need the release profile. Pushing a `v*` tag runs the release workflow, [RELEASING.md](RELEASING.md) describes the process, and `build-release.sh` packages a Linux x86_64 tarball by hand. [SECURITY.md](SECURITY.md) explains how to report a vulnerability.
 
-## Performance
+## License and credits
 
-Benchmarked against ripgrep on large repositories:
-
-| Repository | ripgrep | code-search | Speed Ratio |
-|------------|---------|-------------|-------------|
-| React (6800+ files) | 194ms | 219ms | 89% |
-| warehouse (1700+ files) | 40ms | 63ms | 63% |
-| rustdesk (800+ files) | 15ms | 20ms | 75% |
-| maven (9400+ files) | 300ms | 450ms | 67% |
-
-## How Semantic Search Works
-
-The semantic search mode uses BM25 (Best Matching 25), a ranking function used by search engines. It:
-
-1. **Tokenizes** your query and the code files
-2. **Calculates IDF** (Inverse Document Frequency) for each term
-3. **Scores** each file based on term frequency and document length
-4. **Returns** results ranked by relevance
-
-For best performance, run `code-search init` first to pre-build the index. The index is stored in `.code-search/bm25_index.json` and automatically detects changed files.
-
-## License
-
-MIT
+MIT, copyright 2025 Chris Chabot; see [LICENSE](LICENSE). The implementation commits are authored by [Maestro](https://github.com/iGentMaestro) and merged by Chris Chabot. code-search builds on [`ignore`](https://crates.io/crates/ignore), [`regex`](https://crates.io/crates/regex), [`memchr`](https://crates.io/crates/memchr), [`rayon`](https://crates.io/crates/rayon), [`memmap2`](https://crates.io/crates/memmap2), [`clap`](https://crates.io/crates/clap), [`serde_json`](https://crates.io/crates/serde_json) and [`termcolor`](https://crates.io/crates/termcolor).
