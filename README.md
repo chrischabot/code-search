@@ -111,6 +111,11 @@ cargo test --release
 
 The integration tests in `tests/integration_tests.rs` run the binary at `target/release/code-search`, so they need the release profile. Pushing a `v*` tag runs the release workflow, [RELEASING.md](RELEASING.md) describes the process, and `build-release.sh` packages a Linux x86_64 tarball by hand. [SECURITY.md](SECURITY.md) explains how to report a vulnerability.
 
+## Project background
+
+- [code-search project overview](https://chabot.dev/projects/#code-search) on Chris Chabot’s site.
+- [BM25 before grep](https://chabot.dev/blog/bm25-before-grep/): using lexical ranking to find the vocabulary for an exact search.
+
 ## License and credits
 
 MIT, copyright 2025 Chris Chabot; see [LICENSE](LICENSE). The implementation commits are authored by [Maestro](https://github.com/iGentMaestro) and merged by Chris Chabot. code-search builds on [`ignore`](https://crates.io/crates/ignore), [`regex`](https://crates.io/crates/regex), [`memchr`](https://crates.io/crates/memchr), [`rayon`](https://crates.io/crates/rayon), [`memmap2`](https://crates.io/crates/memmap2), [`clap`](https://crates.io/crates/clap), [`serde_json`](https://crates.io/crates/serde_json) and [`termcolor`](https://crates.io/crates/termcolor).
